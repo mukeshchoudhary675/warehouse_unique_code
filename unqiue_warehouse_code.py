@@ -5,8 +5,8 @@ from io import BytesIO
 
 st.set_page_config(page_title="Warehouse Deduplicator", layout="wide")
 
-st.title("📦 Warehouse Deduplicator")
-st.markdown("Upload your Excel file with warehouse data to clean up duplicate codes.")
+st.title("📦 Warehouse Deduplicator with Verification")
+st.markdown("Upload your Excel file and group warehouses by fuzzy matching logic.")
 
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx"])
 
@@ -16,43 +16,62 @@ if uploaded_file:
     st.subheader("Step 1: Select Columns")
     warehouse_code_col = st.selectbox("Select Warehouse Code column", df.columns)
     warehouse_name_col = st.selectbox("Select Warehouse Name column", df.columns)
-    address_cols = st.multiselect("Select address/location columns to use for matching", df.columns)
+    address_cols = st.multiselect("Select address/location columns for matching", df.columns)
 
-    if st.button("Run Deduplication"):
-        with st.spinner("Processing and matching..."):
-            df["merged_address"] = df[warehouse_name_col] + " " + df[address_cols].astype(str).agg(" ".join, axis=1)
+    if st.button("Run Matching and Grouping"):
+        with st.spinner("Processing..."):
+            # Combine name and address
+            df["combined_address"] = df[warehouse_name_col].fillna('') + " " + df[address_cols].astype(str).agg(" ".join, axis=1)
 
-            unique_list = []
-            code_map = {}
-            new_codes = {}
-            code_counter = 1
+            unique_groups = []
+            group_map = {}
+            group_ids = {}
+            group_counter = 1
 
             for idx, row in df.iterrows():
-                current_str = row["merged_address"]
+                text = row["combined_address"]
 
-                match_found = False
-                for unique in unique_list:
-                    if fuzz.token_sort_ratio(current_str, unique) > 90:
-                        group_key = unique
-                        match_found = True
+                matched = False
+                for group in unique_groups:
+                    if fuzz.token_sort_ratio(text, group) > 90:
+                        matched_group = group
+                        matched = True
                         break
 
-                if not match_found:
-                    group_key = current_str
-                    unique_list.append(group_key)
-                    new_codes[group_key] = f"WH-{code_counter:04d}"
-                    code_counter += 1
+                if not matched:
+                    matched_group = text
+                    unique_groups.append(text)
 
-                code_map[row[warehouse_code_col]] = new_codes[group_key]
+                group_map[idx] = matched_group
 
-            df["Cleaned Warehouse Code"] = df[warehouse_code_col].map(code_map)
-            df["Warehouse Group"] = df["merged_address"].map(new_codes)
+            # Assign group ID and new cleaned warehouse code
+            for i, group in enumerate(unique_groups, start=1):
+                group_ids[group] = f"WH-{i:04d}"
 
-            # Display results
-            st.success(f"✅ Found {len(unique_list)} unique warehouse groups.")
-            st.dataframe(df[[warehouse_code_col, "Cleaned Warehouse Code", warehouse_name_col] + address_cols].head(50))
+            df["Warehouse Group"] = df.index.map(lambda x: group_map[x])
+            df["Cleaned Warehouse Code"] = df["Warehouse Group"].map(group_ids)
 
-            # Download
+            # Count how many rows belong to each group
+            group_counts = df["Warehouse Group"].value_counts().to_dict()
+            df["Warehouse Match Count"] = df["Warehouse Group"].map(group_counts)
+
+            # Summary section
+            st.subheader("📊 Summary")
+            st.markdown(f"🔢 Total rows in dataset: **{len(df)}**")
+            st.markdown(f"📛 Unique warehouse names (raw): **{df[warehouse_name_col].nunique()}**")
+            st.markdown(f"🧠 Unique fuzzy-matched warehouse groups: **{len(unique_groups)}**")
+            st.markdown(f"📦 Cleaned codes assigned: **{df['Cleaned Warehouse Code'].nunique()}**")
+
+            # Show sample results
+            st.subheader("🔍 Sample of Matched Results")
+            st.dataframe(df[[warehouse_code_col, "Cleaned Warehouse Code", warehouse_name_col, "Warehouse Match Count"] + address_cols].head(50))
+
+            # Download cleaned result
             output = BytesIO()
-            df.drop(columns=["merged_address", "Warehouse Group"]).to_excel(output, index=False, engine="openpyxl")
-            st.download_button("📥 Download Cleaned File", data=output.getvalue(), file_name="cleaned_warehouse_data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            df.drop(columns=["combined_address", "Warehouse Group"]).to_excel(output, index=False, engine="openpyxl")
+            st.download_button(
+                label="📥 Download Cleaned File",
+                data=output.getvalue(),
+                file_name="cleaned_warehouse_data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
