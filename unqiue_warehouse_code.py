@@ -1,13 +1,19 @@
 import streamlit as st
 import pandas as pd
 from rapidfuzz import fuzz
+import re
 from io import BytesIO
 
-st.set_page_config(page_title="Warehouse Deduplicator", layout="wide")
-st.title("📦 Warehouse Deduplicator with Match Checker")
-st.markdown("Upload your Excel file and group warehouses by fuzzy matching logic.")
+st.set_page_config(page_title="Exact Name + Smart Address Matcher", layout="wide")
+st.title("📦 Smart Warehouse Code Assigner (Exact Name + Address Match)")
+st.markdown("This app uses **exact match on names** and **smart fuzzy address matching** that respects numeric differences like 'Chamber No. 1' vs 'Chamber No. 2'.")
 
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx"])
+
+def extract_numeric_keywords(text):
+    """Extracts chamber/godown/gala + numbers like 'Chamber No.1', 'Godown No.2'"""
+    matches = re.findall(r"(chamber|godown|gala)[^\d]{0,5}(\d{1,2}[a-zA-Z]{0,1})", text.lower())
+    return set([" ".join(match).strip() for match in matches])
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
@@ -15,76 +21,78 @@ if uploaded_file:
     st.subheader("Step 1: Select Columns")
     warehouse_code_col = st.selectbox("Select Warehouse Code column", df.columns)
     warehouse_name_col = st.selectbox("Select Warehouse Name column", df.columns)
-    address_cols = st.multiselect("Select address/location columns for matching", df.columns)
+    address_col = st.selectbox("Select the full address column", df.columns)
 
-    if st.button("Run Matching and Grouping"):
+    if st.button("Assign Cleaned Codes"):
         with st.spinner("Processing..."):
 
-            # Combine name and address into one string for matching
-            df["combined_address"] = df[warehouse_name_col].fillna('') + " " + df[address_cols].astype(str).agg(" ".join, axis=1)
+            df["Cleaned Warehouse Code"] = None
+            df["Match Check"] = None
 
-            unique_groups = []
-            group_map = {}
-            group_ids = {}
-            group_counter = 1
+            group_id = 1
+            grouped_df = pd.DataFrame()
 
-            for idx, row in df.iterrows():
-                text = row["combined_address"]
+            for name, group in df.groupby(warehouse_name_col):
+                group = group.copy()
+                group["assigned"] = False
+                codes = {}
 
-                matched = False
-                for group in unique_groups:
-                    if fuzz.token_sort_ratio(text, group) > 90:
-                        matched_group = group
-                        matched = True
-                        break
+                for i, row in group.iterrows():
+                    if group.at[i, "assigned"]:
+                        continue
 
-                if not matched:
-                    matched_group = text
-                    unique_groups.append(text)
+                    base_text = row[address_col]
+                    base_nums = extract_numeric_keywords(base_text)
+                    matched_indices = [i]
+                    group.at[i, "assigned"] = True
 
-                group_map[idx] = matched_group
+                    for j, comp_row in group.iterrows():
+                        if i == j or group.at[j, "assigned"]:
+                            continue
 
-            # Assign group ID and cleaned warehouse code
-            for i, group in enumerate(unique_groups, start=1):
-                group_ids[group] = f"WH-{i:04d}"
+                        comp_text = comp_row[address_col]
+                        comp_nums = extract_numeric_keywords(comp_text)
+                        score = fuzz.token_sort_ratio(base_text, comp_text)
 
-            df["Warehouse Group"] = df.index.map(lambda x: group_map[x])
-            df["Cleaned Warehouse Code"] = df["Warehouse Group"].map(group_ids)
+                        # Check fuzzy match + numeric patterns
+                        if score > 90 and base_nums != comp_nums:
+                            continue  # treat as different if numbers differ
 
-            # Add fuzzy group match count
-            group_counts = df["Warehouse Group"].value_counts().to_dict()
-            df["Warehouse Match Count"] = df["Warehouse Group"].map(group_counts)
+                        if score > 90 and base_nums == comp_nums:
+                            matched_indices.append(j)
+                            group.at[j, "assigned"] = True
 
-            # Add raw name match count
-            raw_counts = df[warehouse_name_col].value_counts().to_dict()
-            df["Raw Warehouse Match Count"] = df[warehouse_name_col].map(raw_counts)
+                    cleaned_code = f"WH-{group_id:04d}"
+                    group.loc[group.index.isin(matched_indices), "Cleaned Warehouse Code"] = cleaned_code
+                    group.loc[group.index.isin(matched_indices), "Match Check"] = f"✅ Group {group_id}"
+                    group_id += 1
 
-            # Add MATCH CHECK column
-            df["Match Check"] = df.apply(
-                lambda row: "✅ MATCH" if row["Raw Warehouse Match Count"] == row["Warehouse Match Count"] else "❌ MISMATCH",
-                axis=1
-            )
+                grouped_df = pd.concat([grouped_df, group])
 
-            # Summary section
+            # Raw match count by name
+            raw_name_counts = df[warehouse_name_col].value_counts().to_dict()
+            grouped_df["Raw Warehouse Match Count"] = grouped_df[warehouse_name_col].map(raw_name_counts)
+
+            # Grouped match count by cleaned code
+            group_counts = grouped_df["Cleaned Warehouse Code"].value_counts().to_dict()
+            grouped_df["Warehouse Match Count"] = grouped_df["Cleaned Warehouse Code"].map(group_counts)
+
+            # Summary
             st.subheader("📊 Summary")
-            st.markdown(f"🔢 Total rows in dataset: **{len(df)}**")
-            st.markdown(f"📛 Unique warehouse names (raw): **{df[warehouse_name_col].nunique()}**")
-            st.markdown(f"🧠 Unique fuzzy-matched warehouse groups: **{len(unique_groups)}**")
-            st.markdown(f"📦 Cleaned codes assigned: **{df['Cleaned Warehouse Code'].nunique()}**")
-            mismatch_count = df[df["Match Check"] == "❌ MISMATCH"].shape[0]
-            st.markdown(f"⚠️ Rows flagged for manual check: **{mismatch_count}**")
+            st.markdown(f"🧾 Total rows: **{len(grouped_df)}**")
+            st.markdown(f"🏷️ Unique raw warehouse names: **{df[warehouse_name_col].nunique()}**")
+            st.markdown(f"📦 Cleaned unique warehouse codes: **{grouped_df['Cleaned Warehouse Code'].nunique()}**")
 
-            # Show sample
-            st.subheader("🔍 Sample of Results")
-            st.dataframe(df[[warehouse_code_col, "Cleaned Warehouse Code", warehouse_name_col,
-                            "Raw Warehouse Match Count", "Warehouse Match Count", "Match Check"] + address_cols].head(50))
+            # Show result
+            st.subheader("🔍 Sample Results")
+            st.dataframe(grouped_df[[warehouse_code_col, warehouse_name_col, address_col, "Cleaned Warehouse Code", "Warehouse Match Count", "Raw Warehouse Match Count", "Match Check"]].head(50))
 
-            # Download cleaned file
+            # Download
             output = BytesIO()
-            df.drop(columns=["combined_address", "Warehouse Group"]).to_excel(output, index=False, engine="openpyxl")
+            grouped_df.drop(columns=["assigned"]).to_excel(output, index=False, engine="openpyxl")
             st.download_button(
-                label="📥 Download Cleaned File",
+                label="📥 Download Cleaned Data",
                 data=output.getvalue(),
-                file_name="cleaned_warehouse_data.xlsx",
+                file_name="cleaned_warehouse_code.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
