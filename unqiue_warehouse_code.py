@@ -77,6 +77,13 @@ if uploaded_file:
             group_counts = grouped_df["Cleaned Warehouse Code"].value_counts().to_dict()
             grouped_df["Warehouse Match Count"] = grouped_df["Cleaned Warehouse Code"].map(group_counts)
 
+            # Check if a warehouse name was split into multiple cleaned codes
+            name_code_counts = grouped_df.groupby(warehouse_name_col)["Cleaned Warehouse Code"].nunique().to_dict()
+            grouped_df["Split by Address?"] = grouped_df[warehouse_name_col].map(
+                lambda x: "❗ SPLIT" if name_code_counts.get(x, 1) > 1 else "✅ SAME"
+            )
+
+
             # Summary
             st.subheader("📊 Summary")
             st.markdown(f"🧾 Total rows: **{len(grouped_df)}**")
